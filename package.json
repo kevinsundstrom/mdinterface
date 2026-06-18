@@ -1,6 +1,6 @@
 {
   "name": "mdinterface",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A live markdown canvas wired to Claude Code. Highlight a passage to set both the context and the scope, ask, and Claude edits exactly that and leaves the rest alone.",
   "license": "MIT",
   "author": "Kevin Sundstrom",
