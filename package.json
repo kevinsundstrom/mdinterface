@@ -1,0 +1,64 @@
+{
+  "name": "mdinterface",
+  "version": "0.1.0",
+  "description": "A live markdown canvas wired to Claude Code. Highlight a passage to set both the context and the scope, ask, and Claude edits exactly that and leaves the rest alone.",
+  "license": "MIT",
+  "author": "Kevin Sundstrom",
+  "type": "commonjs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kevinsundstrom/mdinterface.git"
+  },
+  "homepage": "https://github.com/kevinsundstrom/mdinterface#readme",
+  "bugs": {
+    "url": "https://github.com/kevinsundstrom/mdinterface/issues"
+  },
+  "bin": {
+    "mdinterface": "server.js"
+  },
+  "scripts": {
+    "start": "bash start.sh",
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test",
+    "prepublishOnly": "npm run lint && npm run typecheck && npm test"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "markdown",
+    "canvas",
+    "live-preview",
+    "editor",
+    "terminal",
+    "mcp"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "server.js",
+    "mcp-server.js",
+    "access.js",
+    "start.sh",
+    "public/",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "express": "^4.19.0",
+    "node-pty": "^1.0.0",
+    "ws": "^8.17.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.0.0",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.0",
+    "@types/ws": "^8.5.10",
+    "typescript": "^5.5.0"
+  }
+}

@@ -1,0 +1,10 @@
+node_modules/
+
+# mdinterface writes these into the document's folder at runtime — never commit them:
+# they contain a per-launch token and an auto-approved MCP permission grant.
+.claude/
+.mcp.json
+*.log
+
+# runtime backups (pre-overwrite copies of synced docs) — glob so a rename can't un-ignore it:
+*-backups/

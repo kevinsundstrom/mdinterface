@@ -1,0 +1,21 @@
+{
+  // Type-CHECK the JS in CI with no build step (checkJs + noEmit). Kept deliberately lenient:
+  // this is a small CommonJS tool, so tsc should catch real mistakes (typos, wrong arg counts,
+  // bad property access) without forcing every line to be fully annotated.
+  "compilerOptions": {
+    "checkJs": true,
+    "allowJs": true,
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "lib": ["ES2022", "DOM"],
+    "types": ["node"],
+    "skipLibCheck": true,
+    "noImplicitAny": false,
+    "strict": false,
+    "resolveJsonModule": true
+  },
+  "include": ["server.js", "mcp-server.js", "access.js", "test/**/*.js"],
+  "exclude": ["node_modules", "public/vendor"]
+}

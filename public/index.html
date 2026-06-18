@@ -1,0 +1,806 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<!-- Belt-and-suspenders with the server's Referrer-Policy header: never leak the ?t= token via Referer. -->
+<meta name="referrer" content="no-referrer" />
+<title>mdinterface</title>
+<link rel="icon" type="image/png" href="favicon.png" />
+<link rel="stylesheet" href="vendor/xterm.min.css" />
+<style>
+  :root {
+    --paper: #FBFAF7;
+    --ink: #20201C;
+    --ink-soft: #6E6C64;
+    --hairline: #E4E1D8;
+    --live: #0F6E56;
+    --live-wash: #DDF0E8;
+    --changed-wash: #FBEFC9;   /* amber: "recently changed" — distinct from green selection */
+    --changed-bar: #C9920A;
+    --term-bg: #16161A;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: var(--ink);
+    background: var(--paper);
+    display: grid;
+    grid-template-rows: 1fr; /* main fills the window; the header overlays the top */
+  }
+  header {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 20; height: 42px;
+    display: flex; align-items: center; gap: 10px;
+    padding: 0 16px;
+    border-bottom: 1px solid var(--hairline);
+    font-size: 13px; color: var(--ink-soft);
+    background: var(--paper);
+    transform: translateY(-100%); transition: transform 0.18s ease;
+  }
+  header.show { transform: translateY(0); box-shadow: 0 2px 10px rgba(0,0,0,0.07); }
+  header .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--live);
+  }
+  header .dot.off { background: #C9482E; }
+  header strong { color: var(--ink); font-weight: 600; }
+  header .hint { margin-left: auto; font-size: 12px; }
+
+  main {
+    display: grid;
+    grid-template-columns: 1fr 6px 0.85fr;
+    min-height: 0;
+  }
+  #docPane { overflow-y: auto; min-width: 0; }
+  #doc {
+    max-width: 660px;
+    margin: 0 auto;
+    padding: 40px 36px 120px;
+    font-family: "Source Serif 4", Georgia, "Times New Roman", serif;
+    font-size: 17px;
+    line-height: 1.65;
+  }
+  #doc ::selection { background: var(--live-wash); }
+  .block { padding: 2px 10px; margin: 0 -10px; border-radius: 6px; }
+  .block h1, .block h2, .block h3 {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    line-height: 1.25; letter-spacing: -0.01em;
+  }
+  .block h1 { font-size: 28px; } .block h2 { font-size: 21px; } .block h3 { font-size: 17px; }
+  .block pre {
+    font-size: 13.5px; background: #F2F0E9; border: 1px solid var(--hairline);
+    border-radius: 8px; padding: 12px 14px; overflow-x: auto;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  .block code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.88em; }
+  .block blockquote { margin: 0; padding-left: 14px; border-left: 3px solid var(--hairline); color: var(--ink-soft); }
+  .block a { color: var(--live); }
+  /* persistent change highlight — marks what changed and STAYS until the next change
+     (each re-render clears the old marks and applies new ones). Amber, so it doesn't
+     read as the green text selection. */
+  .block.changed { background: var(--changed-wash); box-shadow: inset 3px 0 0 var(--changed-bar); }
+  .block span.changed { background: var(--changed-wash); border-radius: 3px; }
+  .block { cursor: text; }
+  .block.editing { background: #FFFDF4; box-shadow: inset 3px 0 0 var(--live); }
+  textarea.edit {
+    width: 100%; box-sizing: border-box; margin: 0; border: 0; resize: none;
+    background: transparent; color: var(--ink);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 14px; line-height: 1.5; outline: none; overflow: hidden;
+  }
+
+  #divider { background: var(--hairline); cursor: col-resize; }
+  #divider:hover, #divider.active { background: var(--live); }
+
+  /* doc-side Undo: rolls back the last change. Sits on whichever side the doc is on. */
+  #undo {
+    position: fixed; bottom: 16px; left: 16px; z-index: 15;
+    background: var(--paper); color: var(--ink-soft);
+    border: 1px solid var(--hairline); border-radius: 999px;
+    padding: 6px 14px; font-size: 12.5px; cursor: pointer;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+  }
+  #undo:hover:not(:disabled) { border-color: var(--live); color: var(--live); }
+  #undo:disabled { opacity: 0.4; cursor: default; }
+  main.swapped ~ #undo { left: auto; right: 16px; } /* doc moved right → button follows */
+
+  #termPane {
+    background: var(--term-bg);
+    min-width: 0; display: grid; grid-template-rows: 30px 1fr;
+    overflow: hidden; /* clip the xterm canvas to its column — never paint over the doc */
+  }
+  #termPane .bar {
+    display: flex; align-items: center; padding: 0 12px;
+    font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: #8B8B94;
+  }
+  /* always-visible connection indicator (the header dot hides with the toolbar) */
+  #termPane .bar #conn { margin-left: auto; color: #E0613F; letter-spacing: 0; text-transform: none; }
+  #term { padding: 4px 6px 10px 10px; min-height: 0; min-width: 0; overflow: hidden; }
+  #term .xterm { height: 100%; width: 100%; }
+
+  /* selected text in the canvas is mirrored to Claude as ambient context */
+  #doc ::selection { background: var(--live-wash); }
+  /* the exact armed text — persists (via the CSS Custom Highlight API) after the
+     native selection collapses, e.g. when you click into the Claude pane */
+  ::highlight(mdinterface-selection) { background: var(--live-wash); }
+  /* fallback for browsers without the Highlight API: mark the containing block */
+  .block.armed { background: var(--live-wash); box-shadow: inset 3px 0 0 var(--live); }
+
+  /* swap which side the terminal is on (doc keeps the larger share either way) */
+  main.swapped { grid-template-columns: 0.85fr 6px 1fr; }
+  main.swapped #termPane { order: 1; }
+  main.swapped #divider  { order: 2; }
+  main.swapped #docPane  { order: 3; }
+
+  header #swap, header #restart {
+    margin-left: 8px; background: none; border: 1px solid var(--hairline);
+    color: var(--ink-soft); border-radius: 6px; padding: 3px 9px;
+    font-size: 12px; cursor: pointer; white-space: nowrap;
+  }
+  header #restart { margin-left: auto; } /* push the Restart/Swap group to the right edge */
+  header #swap:hover, header #restart:hover { border-color: var(--live); color: var(--live); }
+  header #restart.armed { border-color: #C9482E; color: #C9482E; }
+
+  /* file picker: type/paste a path, Enter to switch documents */
+  header #filepicker {
+    flex: 1 1 auto; max-width: 460px; min-width: 120px;
+    background: var(--paper); color: var(--ink);
+    border: 1px solid var(--hairline); border-radius: 6px; padding: 4px 10px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px;
+  }
+  header #filepicker:focus { outline: none; border-color: var(--live); }
+  header #filepicker.error { border-color: #C9482E; }
+  header #browse {
+    margin-left: 6px; background: none; border: 1px solid var(--hairline);
+    color: var(--ink-soft); border-radius: 6px; padding: 3px 9px; font-size: 12px;
+    cursor: pointer; white-space: nowrap;
+  }
+  header #browse:hover { border-color: var(--live); color: var(--live); }
+  /* shown only when the open doc is Notion-backed (has a mdinterface:notion marker) */
+  header #notionlink {
+    margin-left: 8px; text-decoration: none; white-space: nowrap; font-size: 12px;
+    color: var(--live); border: 1px solid var(--hairline); border-radius: 6px; padding: 3px 9px;
+  }
+  header #notionlink[hidden] { display: none; }
+  header #notionlink:hover { border-color: var(--live); background: var(--live-wash); }
+
+  /* file browser dropdown */
+  #browser {
+    position: fixed; top: 44px; left: 16px; z-index: 40;
+    width: min(560px, 92vw); max-height: 60vh; display: flex; flex-direction: column;
+    background: var(--paper); color: var(--ink);
+    border: 1px solid var(--hairline); border-radius: 10px;
+    box-shadow: 0 10px 34px rgba(0,0,0,0.18); overflow: hidden;
+  }
+  #browser[hidden] { display: none; }
+  #bpath {
+    padding: 9px 12px; border-bottom: 1px solid var(--hairline);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px;
+    color: var(--ink-soft); word-break: break-all;
+  }
+  #blist { overflow-y: auto; padding: 4px; }
+  #blist .brow {
+    display: block; width: 100%; text-align: left; border: 0; background: none;
+    padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 13.5px; color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  #blist .brow:hover { background: var(--live-wash); }
+  #blist .brow.dim { color: var(--ink-soft); }
+  #blist .empty { padding: 10px; color: var(--ink-soft); font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <input id="filepicker" type="text" spellcheck="false" autocomplete="off"
+         placeholder="path to a .md file — press Enter, or click Browse"
+         title="Open a different document — type or paste a path, then press Enter" />
+  <button id="browse" type="button" title="Browse for a file">📁 Browse</button>
+  <a id="notionlink" hidden target="_blank" rel="noopener noreferrer" title="Open the source page in Notion">↗ Notion</a>
+  <button id="restart" type="button" title="Restart the Claude session (reloads hooks, CLAUDE.md, MCP) — ends the current chat">⟲ Restart Claude</button>
+  <button id="swap" type="button" title="Swap which side the Claude terminal is on">⇄ swap sides</button>
+</header>
+
+<div id="browser" hidden role="dialog" aria-label="Open a file">
+  <div id="bpath"></div>
+  <div id="blist"></div>
+</div>
+
+<main>
+  <div id="docPane"><article id="doc" aria-label="Rendered document"></article></div>
+  <div id="divider" role="separator" aria-orientation="vertical" aria-label="Resize panes"></div>
+  <section id="termPane" aria-label="Claude Code session">
+    <div class="bar">claude code<span id="conn"></span></div>
+    <div id="term"></div>
+  </section>
+</main>
+
+<button id="undo" type="button" disabled title="Roll back the last change">↶ Undo</button>
+
+<!-- Libraries are vendored locally (served from public/vendor) so the app works offline
+     and never breaks rendering when a CDN is slow/blocked. -->
+<script src="vendor/marked.min.js"></script>
+<script src="vendor/xterm.min.js"></script>
+<script src="vendor/addon-fit.min.js"></script>
+<script src="vendor/addon-webgl.min.js"></script>
+<script src="vendor/purify.min.js"></script>
+<script src="render-core.js"></script>
+<script>
+// The launch URL carries a per-session token; the server requires it on /doc and the WS.
+const token = new URLSearchParams(location.search).get("t") || "";
+let ws; // (re)assigned by connect()
+const docEl = document.getElementById("doc");
+const conn = document.getElementById("conn");
+const undoBtn = document.getElementById("undo");
+const filepicker = document.getElementById("filepicker");
+const notionLink = document.getElementById("notionlink");
+undoBtn.addEventListener("click", () => send({ type: "undo" }));
+// Show a clickable "↗ Notion" link when the doc carries a `<!-- mdinterface:notion URL -->` marker.
+// Also accept the legacy `line0:notion` and `mdcanvas:notion` markers so documents synced
+// under either earlier name keep working without edits.
+function updateNotionLink(src) {
+  const m = src?.match(/<!--\s*(?:mdinterface|line0|mdcanvas):notion\s+(.+?)\s*-->/i);
+  if (m?.[1]) {
+    let u = m[1].trim();
+    if (!/^https?:\/\//i.test(u)) u = `https://www.notion.so/${u.replace(/-/g, "")}`; // bare id → URL
+    notionLink.href = u; notionLink.hidden = false;
+  } else {
+    notionLink.hidden = true;
+  }
+}
+function setConnected(on) { conn.textContent = on ? "" : "· reconnecting…"; } // status lives in the terminal bar
+
+function setDocMeta(p, n) {
+  if (p && document.activeElement !== filepicker) filepicker.value = p; // don't clobber mid-type
+  document.title = `${n || "mdinterface"} — mdinterface`;
+}
+fetch(`/doc?t=${encodeURIComponent(token)}`).then(r => r.json()).then(d => setDocMeta(d.path, d.name));
+
+// File picker: type/paste a path, Enter to switch documents.
+filepicker.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); filepicker.classList.remove("error"); send({ type: "open", path: filepicker.value }); }
+});
+
+// File browser: click through folders (server lists them) to pick a .md file.
+const browseBtn = document.getElementById("browse");
+const browserEl = document.getElementById("browser");
+const bpath = document.getElementById("bpath");
+const blist = document.getElementById("blist");
+let browserOpen = false;
+function brow(label, onClick, dim) {
+  const b = document.createElement("button");
+  b.className = `brow${dim ? " dim" : ""}`;
+  b.textContent = label;
+  b.addEventListener("click", onClick);
+  return b;
+}
+async function openBrowser(dir) {
+  let d;
+  try {
+    const r = await fetch(`/ls?t=${encodeURIComponent(token)}${dir ? `&dir=${encodeURIComponent(dir)}` : ""}`);
+    d = await r.json();
+    if (!r.ok) throw new Error(d.error || "Cannot read folder");
+  } catch (e) {
+    bpath.textContent = `⚠ ${e.message}`; blist.innerHTML = ""; browserEl.hidden = false; browserOpen = true; return;
+  }
+  bpath.textContent = d.dir;
+  blist.innerHTML = "";
+  if (d.parent) blist.appendChild(brow("⬆  ..", () => openBrowser(d.parent), true));
+  for (const ent of d.entries) {
+    const tag = ent.path === d.current ? "   • open" : "";
+    blist.appendChild(brow((ent.isDir ? "📁  " : "📄  ") + ent.name + tag, () => {
+      if (ent.isDir) openBrowser(ent.path);
+      else { filepicker.value = ent.path; send({ type: "open", path: ent.path }); closeBrowser(); }
+    }));
+  }
+  if (!d.entries.length) {
+    const e = document.createElement("div"); e.className = "empty";
+    e.textContent = "No folders or .md files here."; blist.appendChild(e);
+  }
+  browserEl.hidden = false; browserOpen = true;
+}
+function closeBrowser() { browserEl.hidden = true; browserOpen = false; }
+browseBtn.addEventListener("click", () => (browserOpen ? closeBrowser() : openBrowser()));
+document.addEventListener("click", (e) => {
+  if (browserOpen && !browserEl.contains(e.target) && e.target !== browseBtn) closeBrowser();
+});
+document.addEventListener("keydown", (e) => { if (browserOpen && e.key === "Escape") closeBrowser(); });
+
+// ---------- terminal: the real Claude Code session ----------
+const term = new Terminal({
+  fontSize: 13,
+  fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace',
+  cursorBlink: true,
+  theme: { background: "#16161A", foreground: "#E6E6EA", cursor: "#0F6E56", selectionBackground: "#2E4B41" }
+});
+const fit = new FitAddon.FitAddon();
+term.loadAddon(fit);
+term.open(document.getElementById("term"));
+// GPU-accelerated rendering — Claude Code's TUI repaints constantly, and the default
+// DOM renderer can't keep up (this is the "insane latency"). Fall back to DOM if the
+// WebGL context is unavailable or lost.
+try {
+  const webgl = new WebglAddon.WebglAddon();
+  webgl.onContextLoss(() => webgl.dispose());
+  term.loadAddon(webgl);
+} catch (e) {
+  console.warn("WebGL renderer unavailable, using DOM renderer:", e.message);
+}
+term.onData(d => send({ type: "term-in", data: d }));
+// Shift+Enter → insert a newline instead of submitting. xterm sends a plain `\r` for both
+// Enter and Shift+Enter, so the app can't tell them apart. Emit ESC+CR — the exact bytes
+// Option/Alt+Enter produces — which Claude Code reads as "insert newline" with no setup.
+// (The previous CSI-u sequence `\x1b[13;2u` only works once the kitty keyboard protocol is
+// negotiated, which doesn't happen here, so Enter fell through and submitted the message.)
+term.attachCustomKeyEventHandler((e) => {
+  if (e.type === "keydown" && e.key === "Enter" && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    send({ type: "term-in", data: "\x1b\r" }); // ESC+CR = Meta/Option+Enter = newline
+    return false; // don't let xterm also send a bare carriage return (which submits)
+  }
+  return true;
+});
+let fitTimer, repaintTimer;
+function refit() {
+  try { fit.fit(); } catch {}
+  send({ type: "resize", cols: term.cols, rows: term.rows });
+}
+// Ask the server to force a clean TUI repaint — fixes a terminal whose drawing desynced
+// from its size (stacked/spread text) when a size change alone won't trigger a redraw.
+function nudgeRepaint() { clearTimeout(repaintTimer); repaintTimer = setTimeout(() => send({ type: "repaint" }), 90); }
+function refitSoon() { clearTimeout(fitTimer); fitTimer = setTimeout(() => { refit(); nudgeRepaint(); }, 50); }
+window.addEventListener("resize", refitSoon);
+// Refit when the terminal container's size actually settles (after a reload, a divider
+// drag, or fonts loading) rather than guessing with a one-shot timeout — the guess
+// sometimes measured before layout was ready and mis-sized the terminal on reload.
+new ResizeObserver(refitSoon).observe(document.getElementById("term"));
+if (document.fonts?.ready) document.fonts.ready.then(refit);
+// Returning to the tab/window is a prime moment for a desynced terminal — re-fit and
+// force a clean repaint so it self-heals without a reload.
+window.addEventListener("focus", () => { refit(); nudgeRepaint(); });
+document.addEventListener("visibilitychange", () => { if (!document.hidden) { refit(); nudgeRepaint(); } });
+
+// ---------- websocket plumbing (auto-reconnecting) ----------
+function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+let reconnectDelay = 500;
+function connect() {
+  ws = new WebSocket(`${(location.protocol === "https:" ? "wss://" : "ws://") + location.host}/?t=${encodeURIComponent(token)}`);
+  ws.onopen = () => {
+    setConnected(true);
+    reconnectDelay = 500;
+    flushSelection(); // re-sync the current selection in case it changed while disconnected
+    term.reset(); // clear before the server replays the current screen (avoids duplication)
+    refit();
+  };
+  ws.onclose = () => {
+    setConnected(false);
+    setTimeout(connect, reconnectDelay);          // reconnect with capped backoff
+    reconnectDelay = Math.min(reconnectDelay * 2, 5000);
+  };
+  ws.onerror = () => { try { ws.close(); } catch {} };
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === "term") term.write(msg.data);
+    if (msg.type === "doc") {
+      if (msg.missing) { showMissing(); return; }
+      lastSrc = msg.content;
+      // Don't blow away an in-progress inline edit; re-sync when it finishes.
+      if (!editingEl) render(msg.content);
+    }
+    if (msg.type === "history") undoBtn.disabled = !msg.canUndo;
+    if (msg.type === "opened") {
+      setDocMeta(msg.path, msg.name);
+      filepicker.classList.remove("error");
+      // New document — reset the diff baseline so the whole thing isn't flagged as
+      // "changed" against the file we just came from.
+      prevBlocks = []; prevEls = []; flashedEls = []; lastSrc = "";
+    }
+    if (msg.type === "open-error") { filepicker.classList.add("error"); filepicker.title = msg.message; showHeader(); }
+  };
+}
+function showMissing() {
+  lastSrc = ""; prevBlocks = []; prevEls = []; flashedEls = []; notionLink.hidden = true;
+  docEl.innerHTML = '<p style="color:var(--ink-soft);font-style:italic">The document is no longer on disk — waiting for it to return…</p>';
+}
+connect();
+
+// ---------- block rendering + change flash ----------
+// A change flashes only the words that actually changed, not the whole block:
+// 1) a block-level diff (LCS over each block's raw markdown) finds which blocks are
+//    unchanged, changed, or brand new, pairing each changed block with its old text;
+// 2) a word-level diff inside each changed block wraps just the new/changed words in
+//    a <span class="flash">. Brand-new blocks flash whole.
+let prevBlocks = []; // [{ raw, text }] from the previous render
+let prevEls = [];    // the .block DOM nodes from the previous render, parallel to prevBlocks
+let flashedEls = []; // nodes carrying a change-highlight, cleared on the next render
+let lastSrc = "";    // most recent doc source (for restoring after an edit)
+let editingEl = null; // the .block currently being edited in place
+
+// tokenizeWords / diffOps / classifyBlocks now live in render-core.js (loaded as a <script>
+// before this one, so they're globals here) — shared verbatim with the node:test suite.
+
+// Wrap the changed words of `el` (vs oldText) in flashing spans. Returns false if it
+// punts (too large / wholly changed) so the caller can flash the whole block instead.
+function flashChangedWords(el, oldText) {
+  const newText = el.textContent;
+  const a = tokenizeWords(oldText), b = tokenizeWords(newText);
+  if (b.length === 0) return true;            // nothing visible to flash
+  if (a.length > 600 || b.length > 600) return false; // skip pathological diffs
+  const ops = diffOps(a, b);
+  // Char ranges in newText that are inserted/changed (skip pure-whitespace segments).
+  const ranges = []; const offs = []; let o = 0;
+  for (const seg of b) { offs.push(o); o += seg.length; }
+  for (const op of ops) {
+    if (op[0] !== "ins") continue;
+    const j = op[2], seg = b[j];
+    if (!/\S/.test(seg)) continue;
+    const s = offs[j], e = s + seg.length;
+    if (ranges.length && ranges[ranges.length - 1][1] >= s) ranges[ranges.length - 1][1] = e;
+    else ranges.push([s, e]);
+  }
+  if (!ranges.length) return true;            // changed raw but identical text
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  const nodes = []; while (walker.nextNode()) nodes.push(walker.currentNode);
+  let pos = 0;
+  for (const node of nodes) {
+    const text = node.nodeValue, start = pos; pos += text.length;
+    const local = [];
+    for (const [rs, re] of ranges) {
+      const s = Math.max(rs, start) - start, e = Math.min(re, pos) - start;
+      if (s < e) local.push([s, e]);
+    }
+    if (!local.length) continue;
+    const frag = document.createDocumentFragment();
+    let cur = 0;
+    for (const [ls, le] of local) {
+      if (ls > cur) frag.appendChild(document.createTextNode(text.slice(cur, ls)));
+      const span = document.createElement("span");
+      span.className = "changed";
+      span.textContent = text.slice(ls, le);
+      frag.appendChild(span);
+      cur = le;
+    }
+    if (cur < text.length) frag.appendChild(document.createTextNode(text.slice(cur)));
+    node.parentNode.replaceChild(frag, node);
+  }
+  return true;
+}
+
+// Render one filtered token into a fresh, sanitized .block element.
+function makeBlock(tok) {
+  const div = document.createElement("div");
+  div.className = "block";
+  div.dataset.raw = tok.raw;
+  // Sanitize: a malicious doc could embed <img onerror>/<script> that would run in this
+  // page — which holds the session token — so raw HTML in the markdown must be scrubbed.
+  // If the sanitizer didn't load (CDN failure), fail safe to plain text rather than
+  // ever rendering unsanitized HTML.
+  if (window.DOMPurify) div.innerHTML = DOMPurify.sanitize(marked.parser([tok]));
+  else div.textContent = tok.raw;
+  return div;
+}
+
+// Strip a prior change-highlight from a reused node without re-parsing it: drop the
+// whole-block class and unwrap any per-word <span class="changed"> (keeping their text).
+function clearFlash(el) {
+  el.classList.remove("changed");
+  const spans = el.querySelectorAll("span.changed");
+  if (spans.length) {
+    spans.forEach((s) => {
+      s.replaceWith(document.createTextNode(s.textContent));
+    });
+    el.normalize();
+  }
+}
+
+function render(src) {
+  lastSrc = src;
+  updateNotionLink(src);
+  // Drop blank blocks and any standalone HTML comment (e.g. the mdinterface:notion marker),
+  // so the marker stays invisible in the rendered doc.
+  const tokens = marked.lexer(src).filter((t) => {
+    const r = t.raw.trim();
+    return r !== "" && !/^<!--[\s\S]*-->$/.test(r);
+  });
+
+  // The previous render's highlights clear on this change — undo them now (cheap: only the
+  // handful of nodes that were flashed, and unwrapping never re-parses).
+  for (const el of flashedEls) clearFlash(el);
+  flashedEls = [];
+
+  // First render, or after a document switch: build everything once, with no change-flash.
+  if (!prevBlocks.length) {
+    docEl.innerHTML = "";
+    const els = [], blocks = [];
+    for (const tok of tokens) {
+      const div = makeBlock(tok);
+      docEl.appendChild(div);
+      els.push(div);
+      blocks.push({ raw: tok.raw, text: div.textContent });
+    }
+    prevEls = els; prevBlocks = blocks;
+    return;
+  }
+
+  // Incremental: classify against the previous blocks, then REUSE the DOM nodes of unchanged
+  // blocks and only parse/sanitize the ones that actually changed. Per-edit work becomes
+  // proportional to the edit, not the whole document — and because untouched nodes are never
+  // detached, a text selection or the scroll position in an unchanged region is preserved.
+  const newB = tokens.map((t) => ({ raw: t.raw }));
+  const cls = classifyBlocks(prevBlocks, newB);
+  const scroll = docEl.parentElement.scrollTop;
+
+  const newEls = new Array(newB.length);
+  const newBlocks = new Array(newB.length);
+  const toFlash = []; // defer flashing until the DOM is reconciled
+  for (let idx = 0; idx < newB.length; idx++) {
+    const c = cls[idx] || { type: "new" };
+    if (c.type === "same") {
+      newEls[idx] = prevEls[c.oldIdx];
+      newBlocks[idx] = prevBlocks[c.oldIdx];
+    } else {
+      const el = makeBlock(tokens[idx]);
+      newEls[idx] = el;
+      newBlocks[idx] = { raw: newB[idx].raw, text: el.textContent }; // text captured pre-wrap
+      toFlash.push(c.type === "new" ? { el } : { el, oldText: c.oldText });
+    }
+  }
+
+  // Reconcile docEl's children to newEls with minimal mutation: remove nodes that are gone,
+  // then place each desired node in order. Reused nodes already in position aren't touched.
+  const keep = new Set(newEls);
+  for (const old of Array.from(docEl.childNodes)) if (!keep.has(old)) docEl.removeChild(old);
+  let ref = docEl.firstChild;
+  for (const node of newEls) {
+    if (ref === node) ref = ref.nextSibling;
+    else docEl.insertBefore(node, ref);
+  }
+
+  for (const f of toFlash) {
+    if (f.oldText === undefined) f.el.classList.add("changed");      // brand-new block: flash whole
+    else if (!flashChangedWords(f.el, f.oldText)) f.el.classList.add("changed");
+    flashedEls.push(f.el);
+  }
+
+  docEl.parentElement.scrollTop = scroll;
+  prevEls = newEls; prevBlocks = newBlocks;
+}
+
+// ---------- selection → mirrored to disk → ambient context for Claude ----------
+// No pasting into the prompt: whatever is selected here is written to a file that a
+// UserPromptSubmit hook injects as context on the user's next message.
+//
+// The selection is STICKY: clicking into the Claude pane (or anywhere outside the
+// canvas) collapses the browser selection, but we keep the last canvas selection so
+// it stays available while you type your instruction. It clears only when you click
+// to deselect inside the doc, or make a new selection.
+//
+// The armed text is highlighted via the CSS Custom Highlight API, which paints the
+// exact range without mutating the DOM and persists after the native selection
+// collapses. Browsers without it fall back to marking the containing block(s).
+const HL = "mdinterface-selection";
+const canHighlight = typeof CSS !== "undefined" && CSS.highlights && typeof Highlight !== "undefined";
+let selDebounce;
+let armed = false;
+let armedEls = []; // fallback: blocks marked when the Highlight API is unavailable
+
+function blocksForSelection(sel) {
+  // The .block elements the selection touches — used for the server-side line range.
+  const els = [];
+  for (const el of docEl.querySelectorAll(".block")) {
+    if (sel.containsNode(el, true) && el.dataset.raw) els.push(el);
+  }
+  return els;
+}
+function applyHighlight(sel) {
+  if (canHighlight) {
+    const ranges = [];
+    for (let i = 0; i < sel.rangeCount; i++) {
+      const r = sel.getRangeAt(i);
+      if (!r.collapsed) ranges.push(r.cloneRange());
+    }
+    if (ranges.length) CSS.highlights.set(HL, new Highlight(...ranges));
+    else CSS.highlights.delete(HL);
+  } else {
+    armedEls.forEach((el) => {
+      el.classList.remove("armed");
+    });
+    armedEls = blocksForSelection(sel);
+    armedEls.forEach((el) => {
+      el.classList.add("armed");
+    });
+  }
+}
+function clearHighlight() {
+  if (canHighlight) CSS.highlights.delete(HL);
+  armedEls.forEach((el) => {
+    el.classList.remove("armed");
+  });
+  armedEls = [];
+}
+function pushSelection() {
+  const sel = window.getSelection();
+  const text = sel ? sel.toString().trim() : "";
+  // Use the range's common ancestor: true iff the WHOLE selection is inside the doc.
+  // More robust than checking anchor/focus separately (which is sensitive to selection
+  // direction and boundary nodes).
+  const range = sel?.rangeCount ? sel.getRangeAt(0) : null;
+  const inDoc = range && docEl.contains(range.commonAncestorContainer);
+  if (text && inDoc) {
+    applyHighlight(sel);
+    armed = true;
+    send({ type: "selection", text, blocks: blocksForSelection(sel).map(el => el.dataset.raw) });
+  } else if (!text && inDoc && armed) {
+    // collapsed the selection by clicking inside the doc → clear
+    clearHighlight();
+    armed = false;
+    send({ type: "selection", text: "", blocks: [] });
+  }
+  // else: focus moved outside the canvas (e.g. into Claude) → keep the last selection
+}
+function flushSelection() { clearTimeout(selDebounce); pushSelection(); }
+// Debounced during a live drag, but flushed IMMEDIATELY the moment selecting finishes
+// (mouse release / key release), so the file is current before you can switch to the
+// terminal and submit — closing the race that dropped selections.
+document.addEventListener("selectionchange", () => {
+  clearTimeout(selDebounce);
+  selDebounce = setTimeout(pushSelection, 120);
+});
+document.addEventListener("mouseup", flushSelection);
+// Flush on keyboard selection too, but skip keystrokes inside the terminal (every keypress
+// there would otherwise run a selection check for nothing).
+document.addEventListener("keyup", (e) => {
+  const tp = document.getElementById("termPane");
+  if (!tp?.contains(e.target)) flushSelection();
+});
+
+// ---------- edit the markdown directly in the canvas ----------
+// Double-click a block to edit its raw markdown in place. Click away or ⌘/Ctrl+Enter to
+// save (writes the file → re-renders); Esc to cancel. Editing the raw markdown (not the
+// rendered HTML) round-trips losslessly back to disk.
+function autoGrow(ta) { ta.style.height = "auto"; ta.style.height = `${ta.scrollHeight}px`; }
+
+function beginEdit(block) {
+  if (editingEl || !block.dataset.raw) return;
+  editingEl = block;
+  if (armed) { clearHighlight(); armed = false; send({ type: "selection", text: "", blocks: [] }); }
+  window.getSelection().removeAllRanges();
+
+  const oldRaw = block.dataset.raw;
+  const trailing = (oldRaw.match(/\n+$/) || ["\n"])[0]; // preserve block spacing on save
+  // occurrence index among identical blocks, so the server edits the right one
+  let nth = 0;
+  for (const b of docEl.querySelectorAll(".block")) { if (b === block) break; if (b.dataset.raw === oldRaw) nth++; }
+
+  block.classList.add("editing");
+  const ta = document.createElement("textarea");
+  ta.className = "edit";
+  ta.value = oldRaw.replace(/\n+$/, "");
+  block.innerHTML = "";
+  block.appendChild(ta);
+  autoGrow(ta);
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+
+  let done = false;
+  function finish(save) {
+    if (done) return; done = true;
+    editingEl = null;
+    block.classList.remove("editing");
+    const newRaw = ta.value;
+    if (save && newRaw !== oldRaw.replace(/\n+$/, "")) {
+      send({ type: "edit", oldRaw, newRaw: newRaw + trailing, nth });
+      // server writes → watcher broadcasts → render() replaces this textarea shortly
+    } else {
+      // No change / cancel: beginEdit gutted this node into a <textarea>. Rebuild THIS block
+      // in place from its raw and keep its render-cache entry intact, so the incremental
+      // renderer neither reuses the broken textarea node nor flashes the block as "changed"
+      // (a no-op edit must not light up amber). render() then still picks up any external edits.
+      const i = prevEls.indexOf(block);
+      if (i !== -1) {
+        const fresh = document.createElement("div");
+        fresh.className = "block";
+        fresh.dataset.raw = block.dataset.raw;
+        // Rebuild from the raw markdown the same way render() does, but lex it first so
+        // marked gets real tokens (makeBlock takes a token, not a bare {raw}).
+        if (window.DOMPurify)
+          fresh.innerHTML = DOMPurify.sanitize(marked.parser(marked.lexer(block.dataset.raw)));
+        else fresh.textContent = block.dataset.raw;
+        block.replaceWith(fresh);
+        prevEls[i] = fresh;
+      }
+      render(lastSrc); // restore current doc (incl. any Claude edits made while editing)
+    }
+  }
+  ta.addEventListener("blur", () => finish(true));
+  ta.addEventListener("input", () => autoGrow(ta));
+  ta.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); finish(false); }
+    else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); ta.blur(); }
+  });
+}
+docEl.addEventListener("dblclick", (e) => {
+  const block = e.target.closest(".block");
+  if (block && docEl.contains(block)) beginEdit(block);
+});
+
+// ---------- draggable divider ----------
+const divider = document.getElementById("divider");
+const main = document.querySelector("main");
+const MIN_PANE = 280; // px; min width for either pane
+divider.addEventListener("pointerdown", e => {
+  e.preventDefault();
+  divider.classList.add("active");
+  divider.setPointerCapture(e.pointerId);
+  // Track the left column's width by accumulating cursor deltas against a clamped
+  // running value (not absolute clientX). Clamping the stored width — not the cursor —
+  // means reversing direction responds immediately, with no overshoot dead-zone. Works
+  // for either layout, since the left column is whichever pane has order 1.
+  let lastX = e.clientX;
+  let width = divider.getBoundingClientRect().left - main.getBoundingClientRect().left;
+  let rafPending = false;
+  const move = ev => {
+    width += ev.clientX - lastX;
+    lastX = ev.clientX;
+    const max = main.clientWidth - 6 - MIN_PANE;
+    width = Math.max(MIN_PANE, Math.min(width, max));
+    main.style.gridTemplateColumns = `${width}px 6px 1fr`;
+    if (!rafPending) { rafPending = true; requestAnimationFrame(() => { rafPending = false; refit(); }); }
+  };
+  const up = () => {
+    divider.classList.remove("active");
+    divider.removeEventListener("pointermove", move);
+    divider.removeEventListener("pointerup", up);
+    refit();
+  };
+  divider.addEventListener("pointermove", move);
+  divider.addEventListener("pointerup", up);
+});
+
+// ---------- swap which side the Claude terminal is on (remembered across reloads) ----------
+const swapBtn = document.getElementById("swap");
+function applySwap(on) {
+  main.classList.toggle("swapped", on);
+  main.style.gridTemplateColumns = ""; // drop any divider-drag override → clean default ratio
+  refit();
+}
+applySwap(localStorage.getItem("mdinterface.swap") === "1");
+swapBtn.addEventListener("click", () => {
+  const on = !main.classList.contains("swapped");
+  localStorage.setItem("mdinterface.swap", on ? "1" : "0");
+  applySwap(on);
+});
+
+// ---------- restart the Claude session (reloads hooks / CLAUDE.md / MCP) ----------
+const restartBtn = document.getElementById("restart");
+let restartArmed = false, restartTimer;
+function disarmRestart() {
+  restartArmed = false; clearTimeout(restartTimer);
+  restartBtn.textContent = "⟲ Restart Claude"; restartBtn.classList.remove("armed");
+}
+restartBtn.addEventListener("click", () => {
+  if (!restartArmed) { // first click arms; a second click within 2.5s confirms (avoids accidents)
+    restartArmed = true;
+    restartBtn.textContent = "⟲ Click again to restart";
+    restartBtn.classList.add("armed");
+    restartTimer = setTimeout(disarmRestart, 2500);
+    return;
+  }
+  disarmRestart();
+  term.reset();                 // clear the old session's screen before the fresh one draws
+  send({ type: "restart" });
+});
+
+// ---------- auto-hiding toolbar: reveal only when the cursor reaches the top ----------
+const header = document.querySelector("header");
+let headerHide;
+function showHeader() { clearTimeout(headerHide); header.classList.add("show"); }
+function hideHeaderSoon(delay) { clearTimeout(headerHide); headerHide = setTimeout(() => header.classList.remove("show"), delay); }
+document.addEventListener("mousemove", (e) => { if (e.clientY <= 6) showHeader(); });
+header.addEventListener("mouseenter", showHeader);
+header.addEventListener("mouseleave", () => hideHeaderSoon(300));
+// flash it on load so the controls are discoverable, then tuck away
+showHeader(); hideHeaderSoon(1800);
+</script>
+</body>
+</html>
