@@ -16,7 +16,15 @@ const path = require("node:path");
 const os = require("node:os");
 const crypto = require("node:crypto");
 const { WebSocketServer } = require("ws");
-const pty = require("node-pty");
+// node-pty powers the embedded terminal pane. It's an OPTIONAL native dependency (see
+// optionalDependencies in package.json): if it didn't install or build, the rendered canvas,
+// the file watcher, and the selection bridge all still come up — only the in-window terminal
+// is disabled, and you run `claude` in your own terminal instead (the hooks still feed it the
+// selection off disk). The specific reason is surfaced to the user at spawn time.
+let pty = null;
+try {
+  pty = require("node-pty");
+} catch {}
 
 // ---------- args ----------
 const args = process.argv.slice(2);
@@ -405,13 +413,65 @@ function onPtyData(d) {
     flushTerm();
   }, TERM_FLUSH_MS);
 }
+// pnpm, Yarn PnP, CI caches, and Docker COPY frequently strip the +x bit from node-pty's
+// prebuilt spawn-helper, which makes pty.spawn die — the single most common runtime failure.
+// Restore it in-process, since a postinstall script can't help the people who hit this most
+// (--ignore-scripts / pnpm users disable postinstall). Returns true if it actually fixed a bit.
+function ensureSpawnHelperExecutable() {
+  let fixed = false;
+  try {
+    const root = path.dirname(require.resolve("node-pty/package.json")); // works wherever it's hoisted
+    for (const base of [path.join(root, "prebuilds"), path.join(root, "build", "Release")]) {
+      let ents;
+      try {
+        ents = fs.readdirSync(base, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      const files = [];
+      for (const ent of ents) {
+        if (ent.isDirectory()) files.push(path.join(base, ent.name, "spawn-helper"));
+        else if (ent.name === "spawn-helper") files.push(path.join(base, ent.name));
+      }
+      for (const f of files) {
+        try {
+          if (!(fs.statSync(f).mode & 0o111)) {
+            fs.chmodSync(f, 0o755);
+            fixed = true;
+          }
+        } catch {}
+      }
+    }
+  } catch {}
+  return fixed;
+}
+
+// Turn a spawn failure into a specific, actionable message instead of a generic one.
+function diagnosePtyFailure(e) {
+  const msg = (e && e.message) || String(e);
+  let hint;
+  if (/NODE_MODULE_VERSION|compiled against|different Node/i.test(msg))
+    hint = "node-pty was built for a different Node version — rebuild it:\n  npm rebuild node-pty";
+  else if (/spawn-helper|EACCES|ENOENT|permission/i.test(msg))
+    hint =
+      "node-pty's spawn-helper is missing or not executable:\n" +
+      "  chmod +x node_modules/node-pty/prebuilds/*/spawn-helper\n  npm rebuild node-pty";
+  else hint = "Reinstall the native module:\n  npm rebuild node-pty";
+  return (
+    `Embedded terminal could not start (${msg}).\n${hint}\n` +
+    `The canvas and selection bridge still work — run \`${CLAUDE_CMD}\` in your own terminal beside this window.`
+  );
+}
+
 function spawnPty(cols = 100, rows = 32) {
+  if (!pty) return null; // optional dependency absent — startShell shows the fallback message
+  ensureSpawnHelperExecutable(); // proactively fix a stripped +x bit before we spawn
   const env = { ...process.env, TERM: "xterm-256color", COLORTERM: "truecolor" };
   const cwd = path.dirname(DOC);
   const sh = process.env.SHELL || (os.platform() === "win32" ? "powershell.exe" : "/bin/bash");
   const opts = { name: "xterm-256color", cols, rows, cwd, env };
-  // Launch through the user's interactive login shell so PATH, rc files,
-  // and aliases apply — this is how `claude` is normally found.
+  // Launch through the user's interactive login shell so PATH, rc files, and aliases apply —
+  // this is how `claude` is normally found.
   try {
     return pty.spawn(sh, ["-ilc", CLAUDE_CMD], opts);
   } catch (e) {
@@ -419,18 +479,18 @@ function spawnPty(cols = 100, rows = 32) {
       `Could not start "${CLAUDE_CMD}" via ${sh} (${e.message}); opening a plain shell.`
     );
   }
-  try {
-    return pty.spawn(sh, [], opts);
-  } catch (e) {
-    console.error(
-      `PTY could not start at all (${e.message}).\n` +
-        `node-pty's prebuilt spawn-helper may have lost its executable bit. Restore it:\n` +
-        `  chmod +x node_modules/node-pty/prebuilds/*/spawn-helper\n` +
-        `If there's no prebuilt binary for your platform, build it instead:\n` +
-        `  npm rebuild node-pty`
-    );
-    return null;
+  // Plain-shell fallback. If even this fails, a stripped +x bit on spawn-helper is the usual
+  // cause: self-heal it and retry once before giving up with a diagnosis.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return pty.spawn(sh, [], opts);
+    } catch (e) {
+      if (attempt === 0 && ensureSpawnHelperExecutable()) continue; // fixed a bit → retry
+      console.error(diagnosePtyFailure(e));
+      return null;
+    }
   }
+  return null;
 }
 
 // Start the PTY and wire BOTH its data and exit handlers (the earlier version reattached
@@ -445,7 +505,13 @@ let rapidExits = 0;
 function startShell() {
   shell = spawnPty(ptyCols, ptyRows); // respawn at the current size, not the 100x32 default
   if (!shell) {
-    broadcast({ type: "term", data: "Terminal unavailable — see server console for the fix.\r\n" });
+    // Two cases, both non-fatal: node-pty isn't installed at all, or it is but the spawn
+    // failed (details already in the server console via diagnosePtyFailure). Either way the
+    // canvas + selection bridge work, so point the user at running claude in their own terminal.
+    const data = pty
+      ? "\r\nEmbedded terminal could not start (see the server console). The canvas and selection still work — run claude in your own terminal beside this window and it gets the same context.\r\n"
+      : "\r\nEmbedded terminal disabled: node-pty isn't installed. The canvas and selection still work — run claude in your own terminal beside this window (it gets the same context via the hooks). To enable the in-window terminal: npm i node-pty\r\n";
+    broadcast({ type: "term", data });
     return;
   }
   shellSpawnAt = Date.now();
