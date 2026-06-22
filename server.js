@@ -488,7 +488,7 @@ function ensureSpawnHelperExecutable() {
 
 // Turn a spawn failure into a specific, actionable message instead of a generic one.
 function diagnosePtyFailure(e) {
-  const msg = (e && e.message) || String(e);
+  const msg = e?.message || String(e);
   let hint;
   if (/NODE_MODULE_VERSION|compiled against|different Node/i.test(msg))
     hint = "node-pty was built for a different Node version — rebuild it:\n  npm rebuild node-pty";
@@ -834,7 +834,7 @@ function onServerError(e) {
         `    mdinterface ${JSON.stringify(path.basename(DOC))} --port 8001\n`
     );
   } else {
-    console.error(`\n  mdinterface could not start: ${(e && e.message) || e}\n`);
+    console.error(`\n  mdinterface could not start: ${e?.message || e}\n`);
   }
   process.exit(1);
 }
