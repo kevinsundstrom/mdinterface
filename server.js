@@ -28,17 +28,36 @@ try {
 
 // ---------- args ----------
 const args = process.argv.slice(2);
-const fileArg = args.find((a) => !a.startsWith("--"));
-if (!fileArg) {
-  console.error("Usage: mdinterface <file.md> [--port 7777] [--cmd claude]");
-  process.exit(1);
+if (args.includes("--help") || args.includes("-h")) {
+  console.log(
+    "mdinterface — a live markdown canvas wired to Claude Code.\n\n" +
+      "Usage:\n" +
+      "  mdinterface [file.md] [--port 7777] [--cmd claude]\n\n" +
+      "Run with a file to open it directly, or with no file to start on an empty\n" +
+      "canvas and pick one in the file browser. The folder of the first document\n" +
+      "opened becomes Claude's working directory for the rest of the session.\n\n" +
+      "Options:\n" +
+      "  --port <n>   Port to listen on (default 7777)\n" +
+      '  --cmd <cmd>  Command run in the terminal pane (default "claude";\n' +
+      "               or set MDINTERFACE_CMD)\n" +
+      "  -h, --help   Show this help and exit\n\n" +
+      "The printed URL carries a per-launch token — open that exact URL."
+  );
+  process.exit(0);
 }
-let DOC = path.resolve(fileArg); // reassignable: the toolbar file picker can switch docs
-if (!fs.existsSync(DOC)) {
+// The file is the first bare argument — but skip values that belong to a value-taking flag
+// (`--port 7777`, `--cmd claude`), or with no file they'd be misread as the filename.
+const VALUE_FLAGS = new Set(["--port", "--cmd"]);
+const fileArg = args.find((a, i) => !a.startsWith("--") && !VALUE_FLAGS.has(args[i - 1]));
+// The file is optional: with none, mdinterface opens an empty canvas and the file browser,
+// and initializes the session (hooks, MCP, watcher, Claude) when you pick the first document.
+// reassignable: the toolbar file picker can switch documents.
+let DOC = fileArg ? path.resolve(fileArg) : null;
+if (DOC && !fs.existsSync(DOC)) {
   console.error(`File not found: ${DOC}`);
   process.exit(1);
 }
-if (fs.statSync(DOC).isDirectory()) {
+if (DOC && fs.statSync(DOC).isDirectory()) {
   console.error(
     `${DOC} is a directory — point me at a markdown file, e.g.:\n  node server.js ${path.join(fileArg, "doc.md")}`
   );
@@ -74,7 +93,11 @@ app.use(express.static(path.join(__dirname, "public")));
 app.get("/doc", (req, res) => {
   if (req.query.t !== TOKEN) return res.status(403).end();
   // path is returned (for the file picker) but only to a token-holding client.
-  res.json({ name: path.basename(DOC), path: DOC, content: read() });
+  res.json(
+    DOC
+      ? { name: path.basename(DOC), path: DOC, content: read() }
+      : { name: null, path: null, content: "" }
+  );
 });
 // Directory listing for the file browser: folders (to navigate) + markdown files. Token
 // gated. Lists any dir the user can read — same reach the PTY already has.
@@ -83,7 +106,9 @@ app.get("/ls", (req, res) => {
   const dir =
     typeof req.query.dir === "string" && req.query.dir
       ? path.resolve(req.query.dir)
-      : path.dirname(DOC);
+      : DOC
+        ? path.dirname(DOC)
+        : process.cwd(); // no doc yet → browse from where mdinterface was launched
   let ents;
   try {
     ents = fs.readdirSync(dir, { withFileTypes: true });
@@ -130,14 +155,22 @@ function read() {
 // The canvas never types into Claude. Instead the current selection is mirrored to a
 // file, and a UserPromptSubmit hook injects that file as context on the user's next
 // message — so Claude is ambiently aware of what's selected, with zero prompt noise.
-const CLAUDE_DIR = path.join(path.dirname(DOC), ".claude");
-const SEL_FILE = path.join(CLAUDE_DIR, "mdinterface-selection.txt");
+// Folder-derived paths. When launched with no file, DOC is null and these stay null until
+// the first document is opened (openDoc → initDocSession), which anchors them to its folder.
+let CLAUDE_DIR = null;
+let SEL_FILE = null;
 
 // ---------- runtime file: how the separate MCP process reaches this server ----------
 // canvas_edit writes the open document directly; canvas_open POSTs back to this server. The
 // MCP process reads port/token/doc from this file before each call, so edits follow the
 // toolbar file picker. Edits always apply immediately — undo is the Undo button (or git).
-const RUNTIME_FILE = path.join(CLAUDE_DIR, "mdinterface-runtime.json");
+let RUNTIME_FILE = null;
+// Anchor the support-file paths to the open document's folder. Called once the doc is known.
+function wireDocPaths() {
+  CLAUDE_DIR = path.join(path.dirname(DOC), ".claude");
+  SEL_FILE = path.join(CLAUDE_DIR, "mdinterface-selection.txt");
+  RUNTIME_FILE = path.join(CLAUDE_DIR, "mdinterface-runtime.json");
+}
 function writeRuntime() {
   try {
     fs.mkdirSync(CLAUDE_DIR, { recursive: true });
@@ -349,18 +382,25 @@ function installMcpServer() {
   }
 }
 
-installHooks();
-installMcpServer();
-writeRuntime(); // mode + callback info for the MCP server
-writeSelection("", []); // start clean
+// Per-document session setup: anchor the support files + hooks to the doc's folder, register
+// the MCP server, and seed the runtime/selection files. Runs at boot when a file was given on
+// the command line, or on the first openDoc when launched with no file.
+function initDocSession() {
+  wireDocPaths();
+  installHooks();
+  installMcpServer();
+  writeRuntime(); // mode + callback info for the MCP server
+  writeSelection("", []); // start clean
+}
+if (DOC) initDocSession();
 
 for (const sig of ["exit", "SIGINT", "SIGTERM"]) {
   process.on(sig, () => {
     try {
-      fs.writeFileSync(SEL_FILE, "");
+      if (SEL_FILE) fs.writeFileSync(SEL_FILE, "");
     } catch {}
     try {
-      fs.unlinkSync(RUNTIME_FILE);
+      if (RUNTIME_FILE) fs.unlinkSync(RUNTIME_FILE);
     } catch {} // gone → MCP server defaults back to auto
     if (sig !== "exit") process.exit(0);
   });
@@ -545,17 +585,24 @@ const clients = new Set();
 wss.on("connection", (ws) => {
   clients.add(ws);
   let reconnect = false;
-  if (!shell) {
-    termBuffer = "";
-    rapidExits = 0; // a fresh manual connect (e.g. reload) earns a clean slate of retries
-    startShell();
-  } else if (termBuffer) {
-    // Reconnect (e.g. page reload): replay the current screen for instant content, and
-    // flag for a forced repaint once this client's real size lands (see resize handler).
-    ws.send(JSON.stringify({ type: "term", data: termBuffer }));
-    reconnect = true;
+  if (DOC) {
+    if (!shell) {
+      termBuffer = "";
+      rapidExits = 0; // a fresh manual connect (e.g. reload) earns a clean slate of retries
+      startShell();
+    } else if (termBuffer) {
+      // Reconnect (e.g. page reload): replay the current screen for instant content, and
+      // flag for a forced repaint once this client's real size lands (see resize handler).
+      ws.send(JSON.stringify({ type: "term", data: termBuffer }));
+      reconnect = true;
+    }
+    ws.send(JSON.stringify({ type: "doc", content: read(), missing: !fs.existsSync(DOC) }));
+  } else {
+    // No document yet (launched with no file): don't spawn Claude — its working directory is
+    // unknown until the first pick. Tell the client to show the picker instead of a terminal.
+    // The message handler below still runs, so the client's "open" pick is honored.
+    ws.send(JSON.stringify({ type: "nodoc" }));
   }
-  ws.send(JSON.stringify({ type: "doc", content: read(), missing: !fs.existsSync(DOC) }));
   ws.send(JSON.stringify({ type: "history", canUndo: history.length > 0 }));
 
   ws.on("message", (raw) => {
@@ -648,7 +695,7 @@ function broadcast(obj) {
 // and which would otherwise silence a file-level watch. A slow polling watch stays on
 // as a safety net; the `last` check keeps either path from double-broadcasting.
 let last = read();
-let lastMissing = !fs.existsSync(DOC);
+let lastMissing = Boolean(DOC) && !fs.existsSync(DOC); // no doc yet → not "missing", just unset
 let updateTimer = null;
 // Undo history: prior document contents, newest last. Every observed change (from Claude,
 // the canvas, or an external editor) pushes the previous version, so the doc-side Undo
@@ -700,7 +747,7 @@ function startWatcher() {
   }
   fs.watchFile(DOC, { interval: 1000 }, maybeUpdate); // fallback safety net
 }
-startWatcher();
+if (DOC) startWatcher(); // with no file yet, the watcher starts when the first doc is opened
 
 // Switch the active document at runtime (toolbar file picker) WITHOUT restarting the
 // Claude session. Only the content document changes; the support files (selection,
@@ -746,18 +793,32 @@ function openDoc(rawPath) {
     };
   if (resolved === DOC) return { error: "That document is already open." };
 
+  const firstDoc = DOC === null; // launched with no file → this pick initializes the session
   DOC = resolved;
   history.length = 0;
   historyBytes = 0;
   last = read();
   lastMissing = !fs.existsSync(DOC);
-  writeRuntime(); // runtime.doc → new path, so canvas_edit edits the right file
-  writeSelection("", []); // clear the (now-irrelevant) selection
+  if (firstDoc) {
+    // Anchor support files + hooks to this folder and register the MCP server, exactly as a
+    // file-on-launch start does at boot. The session's working directory is fixed from here.
+    initDocSession();
+  } else {
+    writeRuntime(); // runtime.doc → new path, so canvas_edit edits the right file
+    writeSelection("", []); // clear the (now-irrelevant) selection
+  }
   startWatcher(); // watch the new file/folder
 
   broadcast({ type: "opened", path: DOC, name: path.basename(DOC) });
   broadcast({ type: "doc", content: read(), missing: lastMissing });
   broadcastHistory();
+  // First document: now that the working directory is known, start Claude. Connected clients
+  // receive its output via broadcast. (Switching docs later preserves the session — no respawn.)
+  if (firstDoc && !shell) {
+    termBuffer = "";
+    rapidExits = 0;
+    startShell();
+  }
   return { ok: true }; // no shell.kill() — the Claude session is preserved
 }
 
@@ -782,7 +843,7 @@ wss.on("error", onServerError);
 
 server.listen(PORT, "127.0.0.1", () => {
   const url = `http://localhost:${PORT}/?t=${TOKEN}`;
-  console.log(`mdinterface ▸ ${path.basename(DOC)} ▸ ${url}`);
+  console.log(`mdinterface ▸ ${DOC ? path.basename(DOC) : "(pick a document)"} ▸ ${url}`);
   const opener =
     os.platform() === "darwin" ? "open" : os.platform() === "win32" ? "start" : "xdg-open";
   require("node:child_process").exec(`${opener} "${url}"`);

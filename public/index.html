@@ -387,7 +387,11 @@ function connect() {
       if (!editingEl) render(msg.content);
     }
     if (msg.type === "history") undoBtn.disabled = !msg.canUndo;
+    if (msg.type === "nodoc") showNoDoc();
     if (msg.type === "opened") {
+      // Leaving the no-document state: the server is starting Claude now, so reset the
+      // terminal for its fresh output and dismiss the picker.
+      if (nodoc) { nodoc = false; closeBrowser(); term.reset(); }
       setDocMeta(msg.path, msg.name);
       filepicker.classList.remove("error");
       // New document — reset the diff baseline so the whole thing isn't flagged as
@@ -400,6 +404,19 @@ function connect() {
 function showMissing() {
   lastSrc = ""; prevBlocks = []; prevEls = []; flashedEls = []; notionLink.hidden = true;
   docEl.innerHTML = '<p style="color:var(--ink-soft);font-style:italic">The document is no longer on disk — waiting for it to return…</p>';
+}
+// No file was given at launch. Show a hint + the file browser; Claude doesn't start until a
+// document is picked (its folder becomes the working directory). Set by the server's "nodoc".
+let nodoc = false;
+function showNoDoc() {
+  nodoc = true;
+  lastSrc = ""; prevBlocks = []; prevEls = []; flashedEls = []; notionLink.hidden = true;
+  docEl.innerHTML = '<p style="color:var(--ink-soft);font-style:italic">No document open — pick a <code>.md</code> file to start. The folder you choose becomes Claude’s working directory.</p>';
+  document.title = "mdinterface — pick a document";
+  term.reset();
+  term.writeln("\x1b[2m  No Claude session yet — pick a document to begin.\x1b[0m");
+  showHeader();
+  openBrowser(); // pop the file browser at the launch directory
 }
 connect();
 
@@ -794,7 +811,7 @@ restartBtn.addEventListener("click", () => {
 const header = document.querySelector("header");
 let headerHide;
 function showHeader() { clearTimeout(headerHide); header.classList.add("show"); }
-function hideHeaderSoon(delay) { clearTimeout(headerHide); headerHide = setTimeout(() => header.classList.remove("show"), delay); }
+function hideHeaderSoon(delay) { if (nodoc) return; clearTimeout(headerHide); headerHide = setTimeout(() => header.classList.remove("show"), delay); }
 document.addEventListener("mousemove", (e) => { if (e.clientY <= 6) showHeader(); });
 header.addEventListener("mouseenter", showHeader);
 header.addEventListener("mouseleave", () => hideHeaderSoon(300));

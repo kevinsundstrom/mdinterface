@@ -48,10 +48,18 @@ CDN, no first-load internet requirement.
     node server.js path/to/doc.md
     # prints a URL like http://localhost:7777/?t=… — open THAT (it carries a session token)
 
+Or start with **no file** — you get an empty canvas and a file browser; pick a `.md` and the
+session begins. The folder of that first document becomes Claude's working directory for the
+rest of the session, so launch from (or pick within) the project you want Claude to work in:
+
+    node server.js
+    # empty canvas → Browse → pick a doc; Claude starts in that doc's folder
+
 Options:
 
     --port 8000        # different port
     --cmd "claude --continue"   # custom launch command (or set MDINTERFACE_CMD)
+    --help             # usage and exit
 
 ## Use
 
