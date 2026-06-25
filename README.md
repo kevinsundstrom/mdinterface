@@ -22,37 +22,32 @@ and Claude's awareness is wired through its hooks, not by typing into its prompt
     Claude Code       ──edits──────────────▶ the file on disk
     file watcher      ──content────────────▶ canvas re-render
 
-## Setup
+## Install
 
-    cd mdinterface
-    npm install        # express, ws, node-pty (ships a native helper)
+No clone, no install — run it straight from npm:
 
-Requires Node 18+ and the `claude` CLI on your PATH.
+    npx mdinterface            # empty canvas; pick a file in the browser
+    npx mdinterface doc.md     # open a file directly
 
-If the terminal pane says **"Terminal unavailable,"** `node-pty`'s prebuilt helper lost
-its executable bit (a common install hiccup). Restore it:
+Or install it globally so `mdinterface` is always on your PATH:
 
-    chmod +x node_modules/node-pty/prebuilds/*/spawn-helper
+    npm install -g mdinterface
+    mdinterface doc.md
 
-If there's no prebuilt binary for your platform, build it instead (needs Xcode Command
-Line Tools / build-essential):
-
-    npm rebuild node-pty
-
-The rendering and terminal libraries (`marked`, `xterm` and its addons, `DOMPurify`) are
-**bundled in `public/vendor/`** and served locally, so mdinterface works fully offline — no
-CDN, no first-load internet requirement.
+Requires **Node 18+** and the `claude` CLI on your PATH. The first `npx` run downloads the
+package and caches it; later runs reuse the cache. If a new release doesn't show up, force a
+refresh with `npx mdinterface@latest`.
 
 ## Run
 
-    node server.js path/to/doc.md
+    mdinterface path/to/doc.md
     # prints a URL like http://localhost:7777/?t=… — open THAT (it carries a session token)
 
 Or start with **no file** — you get an empty canvas and a file browser; pick a `.md` and the
 session begins. The folder of that first document becomes Claude's working directory for the
 rest of the session, so launch from (or pick within) the project you want Claude to work in:
 
-    node server.js
+    mdinterface
     # empty canvas → Browse → pick a doc; Claude starts in that doc's folder
 
 Options:
@@ -60,6 +55,29 @@ Options:
     --port 8000        # different port
     --cmd "claude --continue"   # custom launch command (or set MDINTERFACE_CMD)
     --help             # usage and exit
+
+## From source (development)
+
+    git clone https://github.com/kevinsundstrom/mdinterface
+    cd mdinterface
+    npm install        # express, ws, node-pty (ships a native helper)
+    node server.js doc.md
+
+If the terminal pane says **"Terminal unavailable,"** `node-pty`'s prebuilt helper lost its
+executable bit (a common install hiccup). mdinterface tries to self-heal this at startup; if it
+still fails, restore the bit yourself:
+
+    chmod +x node_modules/node-pty/prebuilds/*/spawn-helper
+
+If there's no prebuilt binary for your platform, build it instead (needs Xcode Command Line
+Tools / build-essential):
+
+    npm rebuild node-pty
+
+Either way the canvas and selection bridge work even if the embedded terminal can't — just run
+`claude` in your own terminal beside the window. The rendering and terminal libraries (`marked`,
+`xterm` and its addons, `DOMPurify`) are **bundled in `public/vendor/`** and served locally, so
+mdinterface works fully offline — no CDN, no first-load internet requirement.
 
 ## Use
 
