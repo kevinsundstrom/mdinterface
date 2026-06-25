@@ -22,10 +22,16 @@ The "last-synced" point is a lightweight tag, **`mdinterface-synced/<page-id>`**
 moves to the commit holding the agreed content. The file at that tag is BASE
 (`git show mdinterface-synced/<id>:<file>`). Derive `<page-id>` from the marker (the 32-hex id).
 
-Cleaning, whenever you bring Notion content local: strip `<span discussion-urls="…">…</span>`
+Cleaning, whenever you bring Notion content local: render the page **title** as a top-level
+`# Heading` just below the marker line (the title is a page property, so a content-only pull
+drops it and the doc looks headingless vs. Notion); preserve Notion's line structure — each
+Notion line is its own block, but a content-only pull returns them newline-separated and
+Markdown collapses single newlines into one paragraph, so end each stacked line with a trailing
+`\` hard break (or a blank line for genuine paragraphs); strip `<span discussion-urls="…">…</span>`
 keeping inner text, drop `<mention-user .../>`, turn `<br>— Name` attributions into their own
 `>` line, unescape `\[ \]`; if the page has multiple version toggles, ask which (or use the
-latest). Keep the marker on line 1 of the local file; strip it before sending to Notion.
+latest). Keep the marker on line 1 of the local file; strip it before sending to Notion (along
+with the title `# Heading`, which maps back to the page-title property, not body content).
 
 **"sync"** — reconcile automatically:
 1. BASE = file at the tag (no tag ⇒ first sync). LOCAL = working file, marker stripped.
