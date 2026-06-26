@@ -6,6 +6,9 @@
 <!-- Belt-and-suspenders with the server's Referrer-Policy header: never leak the ?t= token via Referer. -->
 <meta name="referrer" content="no-referrer" />
 <title>mdinterface</title>
+<!-- Inline SVG smiley favicon (classic yellow face, dark eyes, gentle smile) — no binary
+     asset, no network request, renders the same everywhere. rgb() so there's no '#' to escape. -->
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='16' fill='rgb(255,202,64)'/><circle cx='11.6' cy='13' r='2' fill='rgb(51,44,33)'/><circle cx='20.4' cy='13' r='2' fill='rgb(51,44,33)'/><path d='M10.5 18.5 Q16 22.5 21.5 18.5' fill='none' stroke='rgb(51,44,33)' stroke-width='2.1' stroke-linecap='round'/></svg>" />
 <link rel="stylesheet" href="vendor/xterm.min.css" />
 <style>
   :root {
@@ -103,6 +106,7 @@
   #undo:hover:not(:disabled) { border-color: var(--live); color: var(--live); }
   #undo:disabled { opacity: 0.4; cursor: default; }
   main.swapped ~ #undo { left: auto; right: 16px; } /* doc moved right → button follows */
+  main.swapped ~ #browser { left: auto; right: 16px; } /* …and the file browser follows the doc pane too */
 
   #termPane {
     background: var(--term-bg);
@@ -201,11 +205,6 @@
   <button id="swap" type="button" title="Swap which side the Claude terminal is on">⇄ swap sides</button>
 </header>
 
-<div id="browser" hidden role="dialog" aria-label="Open a file">
-  <div id="bpath"></div>
-  <div id="blist"></div>
-</div>
-
 <main>
   <div id="docPane"><article id="doc" aria-label="Rendered document"></article></div>
   <div id="divider" role="separator" aria-orientation="vertical" aria-label="Resize panes"></div>
@@ -214,6 +213,13 @@
     <div id="term"></div>
   </section>
 </main>
+
+<!-- The file browser is a fixed-position overlay (DOM order is invisible to rendering);
+     placed after <main> so the `main.swapped ~ #browser` rule can slide it to the doc pane's side. -->
+<div id="browser" hidden role="dialog" aria-label="Open a file">
+  <div id="bpath"></div>
+  <div id="blist"></div>
+</div>
 
 <button id="undo" type="button" disabled title="Roll back the last change">↶ Undo</button>
 
@@ -328,13 +334,13 @@ try {
 }
 term.onData(d => send({ type: "term-in", data: d }));
 // Shift+Enter → insert a newline instead of submitting. xterm sends a plain `\r` for both
-// Enter and Shift+Enter, so the app can't tell them apart. Emit ESC+CR — the exact bytes
-// Option/Alt+Enter produces — which Claude Code reads as "insert newline" with no setup.
-// (The previous CSI-u sequence `\x1b[13;2u` only works once the kitty keyboard protocol is
-// negotiated, which doesn't happen here, so Enter fell through and submitted the message.)
+// Enter and Shift+Enter, so the app can't tell them apart. Emit a bare LF (`\n`) — the exact
+// byte Ctrl+J produces, which Claude Code reads as "insert newline" with no terminal setup.
+// (Earlier attempts sent `\x1b[13;2u` (needs the kitty keyboard protocol, never negotiated
+// here) and then ESC+CR (`\x1b\r`); neither inserted a newline in Claude Code's input. LF does.)
 term.attachCustomKeyEventHandler((e) => {
   if (e.type === "keydown" && e.key === "Enter" && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
-    send({ type: "term-in", data: "\x1b\r" }); // ESC+CR = Meta/Option+Enter = newline
+    send({ type: "term-in", data: "\n" }); // LF = Ctrl+J — the sequence Claude Code treats as newline
     return false; // don't let xterm also send a bare carriage return (which submits)
   }
   return true;
@@ -391,7 +397,13 @@ function connect() {
     if (msg.type === "opened") {
       // Leaving the no-document state: the server is starting Claude now, so reset the
       // terminal for its fresh output and dismiss the picker.
-      if (nodoc) { nodoc = false; closeBrowser(); term.reset(); }
+      if (nodoc) {
+        nodoc = false; closeBrowser(); term.reset();
+        // The shell just spawned — re-fit (sends the real pane size, now that a shell
+        // exists to receive it) and nudge a clean repaint, so the first frame isn't a
+        // 100×32 TUI stretched across a wider canvas. Mirrors what a reload does on reconnect.
+        refit(); nudgeRepaint();
+      }
       setDocMeta(msg.path, msg.name);
       filepicker.classList.remove("error");
       // New document — reset the diff baseline so the whole thing isn't flagged as

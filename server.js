@@ -664,11 +664,16 @@ wss.on("connection", (ws) => {
       broadcastHistory();
       return;
     }
-    if (!shell) return;
-    if (msg.type === "term-in") shell.write(msg.data);
+    // Remember the client's size even before a shell exists (no-doc launch): otherwise the
+    // picker-spawn happens at the 100×32 default instead of the real pane size. The
+    // shell.resize + repaint nudge need a live shell, so they stay guarded below.
     if (msg.type === "resize" && msg.cols && msg.rows) {
       ptyCols = msg.cols;
       ptyRows = msg.rows;
+    }
+    if (!shell) return;
+    if (msg.type === "term-in") shell.write(msg.data);
+    if (msg.type === "resize" && msg.cols && msg.rows) {
       try {
         shell.resize(msg.cols, msg.rows);
       } catch {}
