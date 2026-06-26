@@ -8,3 +8,12 @@ node_modules/
 
 # runtime backups (pre-overwrite copies of synced docs) — glob so a rename can't un-ignore it:
 *-backups/
+
+# personal / demo documents you open in the canvas — must NEVER reach this public repo.
+# Two protections: these ignore rules stop accidental `git add`, and a pre-push hook
+# (.git/hooks/pre-push) refuses to push any tree that still contains them.
+# Put new personal docs under scratch/ and they're covered automatically.
+scratch/
+testing.md
+draft.md
+untitled.md
